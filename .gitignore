@@ -1,0 +1,17 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Installer-generated backups (in ~/.hammerspoon, but exclude defensively)
+*.backup-*
+
+# Captured shots (in case anyone clones into a path that overlaps saveDir)
+quickshot-*.png

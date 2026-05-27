@@ -60,7 +60,9 @@ Next steps:
 
 Default hotkeys (Caps Lock as held modifier — see caps-setup.sh):
   Caps+A                drag-area screenshot
-  Caps+V                paste latest auto-group
+  Caps+Z                toggle burst mode
+  Caps+V                paste latest auto-group (current pasteMode)
+  Caps+F                paste latest auto-group as files (Finder-style)
   Caps+N                paste last N (default 4)
   Caps+Shift+V          prompt for N, then paste
   Caps+O                open ~/Pictures/QuickShots

@@ -1,75 +1,128 @@
 # QuickShots
 
-Tiny Hammerspoon module for fast drag-area screenshots that auto-group and paste
-into anything — Claude Code, Codex CLI, Slack, browsers, you name it.
+A tiny Hammerspoon module for fast drag-area screenshots that auto-group and
+paste into anything — Claude Code, Codex CLI, Slack, Messages, browsers,
+Markdown editors, you name it.
 
-## What it does
+No daemons. No databases. No extra app to install. Just Hammerspoon, the
+built-in `screencapture` binary, and a few hundred lines of Lua.
 
-- **One hotkey** triggers macOS's native drag-area screenshot UI.
-- Saves PNGs into `~/Pictures/QuickShots`.
-- Screenshots taken within **20 seconds** of each other become an **auto-group**.
-- A second hotkey **pastes the latest group** (or the last N) in whatever
-  format the active app prefers — newline-separated paths, shell-quoted args,
-  Markdown image links, file references, raw image objects, or a ready-to-run
-  `codex resume --last --image '...'` command line.
-- All actions are also exposed as `hammerspoon://` URL events so
-  BetterTouchTool, Raycast, Alfred, or shell scripts can trigger them.
+## Features
 
-No daemons, no databases, no extra app — just Hammerspoon and `screencapture`.
+- **One keypress → drag-area screenshot.** Native macOS region picker; Space
+  toggles window mode; Esc cancels.
+- **Caps Lock as a held modifier.** Optional one-time remap turns Caps Lock
+  into a QuickShots-only modifier so the bindings never collide with
+  anything else on your system. Unmapped keys still type normally while
+  Caps is held.
+- **Burst mode.** Toggle on, drag as many regions as you want with no
+  per-shot keypress, toggle off.
+- **Auto-grouping.** Screenshots taken within a configurable time window
+  (default 20 s) — or all shots from the same burst — become one paste
+  group automatically.
+- **Six paste modes.** Newline-separated paths, shell-quoted args, Markdown
+  image links, file references (real Finder-style multi-file paste), raw
+  image objects, or a ready-to-run `codex --image` command line.
+- **URL events.** Every action is reachable via `hammerspoon://…` so
+  BetterTouchTool, Raycast, Alfred, Stream Deck, or plain shell scripts
+  can trigger captures and pastes.
+- **Persistent history.** Last 300 shots are remembered across Hammerspoon
+  reloads, so paste-last-N works even after a restart.
+
+## Requirements
+
+- macOS (uses `screencapture`, `hidutil`, NSPasteboard).
+- [Hammerspoon](https://www.hammerspoon.org).
 
 ## Install
 
-You need [Hammerspoon](https://www.hammerspoon.org). Then from this directory:
-
 ```sh
+git clone https://github.com/josephvore/quickshots.git
+cd quickshots
 ./install.sh
 ```
 
 The installer:
 
 - creates `~/.hammerspoon/` if it does not exist;
-- copies `quickshots.lua` to `~/.hammerspoon/quickshots.lua`
-  (backing up any prior copy with a timestamped suffix);
-- appends a small loader block to `~/.hammerspoon/init.lua`
-  (backing up any prior `init.lua` first, and refusing to duplicate the loader).
+- copies `quickshots.lua` to `~/.hammerspoon/quickshots.lua` (backing up
+  any prior copy with a timestamped suffix);
+- appends a small loader block to `~/.hammerspoon/init.lua` (backing up
+  any prior `init.lua` first, and refusing to duplicate the loader).
 
 After install, click the Hammerspoon menu-bar icon → **Reload Config**
-(or `hs -c 'hs.reload'` if the CLI is installed).
+(or `hs -c 'hs.reload()'` if the CLI is installed). You should see a
+**"QuickShots ready"** toast.
 
-## Default hotkeys
+### Caps Lock as held modifier (recommended)
 
-QuickShots ships with two binding systems. Use whichever suits your keyboard:
+Run once:
 
-### 1. Caps Lock as a held modifier (default)
+```sh
+./caps-setup.sh
+```
 
-Caps Lock becomes a "QuickShots" modifier — hold it and tap a letter. Set up
-once with `./caps-setup.sh` (it remaps Caps Lock to F18 via `hidutil` and
-installs a launch agent so the remap survives reboots). Reverse with
-`./caps-uninstall.sh`.
+This remaps Caps Lock → F18 via `hidutil` and installs a launch agent so
+the remap survives reboots. Reverse it any time with `./caps-uninstall.sh`.
 
-| Hotkey         | Action                                  |
-| -------------- | --------------------------------------- |
-| `Caps+A`       | Drag-area screenshot                    |
-| `Caps+V`       | Paste the latest auto-group             |
-| `Caps+N`       | Paste the last `defaultLastN` (4)       |
-| `Caps+Shift+V` | Prompt for N, then paste the last N     |
-| `Caps+O`       | Open `~/Pictures/QuickShots` in Finder  |
+Prefer to leave Caps Lock alone? See **Standard Hammerspoon hotkeys**
+below.
+
+## Default bindings
+
+| Hotkey         | Action                                         |
+| -------------- | ---------------------------------------------- |
+| `Caps+A`       | Drag-area screenshot                           |
+| `Caps+Z`       | Toggle burst mode                              |
+| `Caps+V`       | Paste latest auto-group (current `pasteMode`)  |
+| `Caps+F`       | Paste latest auto-group as files (Finder-style)|
+| `Caps+N`       | Paste last `defaultLastN` (4)                  |
+| `Caps+Shift+V` | Prompt for N, then paste the last N            |
+| `Caps+O`       | Open `~/Pictures/QuickShots` in Finder         |
 
 While Caps is held, mapped keys fire QuickShots actions and are consumed.
-Unmapped keys type normally — holding Caps and typing `hello` still produces
-`hello`. The host app never sees a `Caps` keypress on its own.
+Unmapped keys type normally — holding Caps and typing `hello` still
+produces `hello`. The host app never sees a `Caps` keypress on its own.
 
-### 2. Standard Hammerspoon hotkeys (off by default)
+### Burst mode
 
-If you'd rather not remap Caps Lock, edit the `hotkeys` table at the top of
-`quickshots.lua` and assign each entry a `{ {modifiers}, key }` pair (e.g.
-`capture = { { "ctrl", "alt" }, "s" }`). Standard hotkeys and Caps bindings
-can coexist — set whichever you don't want to `nil`.
+`Caps+Z` toggles burst on/off. While burst is on:
+
+- Each captured region is tagged with a shared burst id.
+- The drag-area picker re-launches automatically after every shot.
+- Pressing `Esc` during the picker exits burst cleanly.
+
+`Caps+V` (or `Caps+F`) after a burst pastes the *entire burst*, no matter
+how long the burst ran — the time-window grouping doesn't apply to bursts.
+
+### Standard Hammerspoon hotkeys (off by default)
+
+If you'd rather not remap Caps Lock, edit the `hotkeys` table at the top
+of `quickshots.lua` and assign each entry a `{ {modifiers}, key }` pair
+(e.g. `capture = { { "ctrl", "alt" }, "s" }`). Standard hotkeys and Caps
+bindings can coexist — set whichever you don't want to `nil`.
+
+## Paste modes
+
+Set `config.pasteMode` to one of:
+
+| Mode       | Clipboard payload                                                      | Best for                                                                  |
+| ---------- | ---------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| `paths`    | Absolute paths, one per line (default).                                | Claude Code, Codex CLI, terminals, anything path-aware.                   |
+| `quoted`   | Shell-quoted paths, one line, space-separated.                         | Pasting straight into a shell command.                                    |
+| `markdown` | `![](path)` per line.                                                  | Markdown editors, GitHub issues, Notion-ish surfaces.                     |
+| `files`    | Real `public.file-url` pasteboard items, one per file.                 | Messages, Mail, Notes, Slack, browser file inputs — same as Finder copy.  |
+| `images`   | Raw image objects on the pasteboard.                                   | Apps that prefer inline image paste. Most apps only keep the first image. |
+| `codex`    | `codex resume --last --image '/p/one' --image '/p/two'` (configurable) | Codex CLI image input.                                                    |
+
+The `Caps+F` shortcut forces `files` mode for one paste, regardless of
+your global `pasteMode`. Use `Caps+V` for whatever you've configured as
+the default.
 
 ## Configuration
 
-Edit the `config` table at the top of `~/.hammerspoon/quickshots.lua`, or
-override fields from `init.lua` before calling `start()`:
+Either edit the `config` table at the top of `~/.hammerspoon/quickshots.lua`
+directly, or override fields from `init.lua` before `start()`:
 
 ```lua
 local qs = require("quickshots")
@@ -77,97 +130,118 @@ qs.start({
   pasteMode = "codex",
   pasteAfterCopy = false,
   groupWindowSeconds = 30,
-  hotkeys = { capture = { { "cmd", "shift" }, "2" } },  -- example override
+  hotkeys = { capture = { { "cmd", "shift" }, "2" } },
 })
 ```
 
 | Key                  | Default                       | Notes                                                       |
 | -------------------- | ----------------------------- | ----------------------------------------------------------- |
 | `saveDir`            | `$HOME/Pictures/QuickShots`   | Created on demand.                                          |
-| `groupWindowSeconds` | `20`                          | Window for auto-grouping.                                   |
+| `groupWindowSeconds` | `20`                          | Time window for auto-grouping non-burst shots.              |
 | `maxHistory`         | `300`                         | History entries beyond this are dropped (oldest first).     |
 | `defaultLastN`       | `4`                           | Used by `pasteLastN` and the URL event without `n`.         |
-| `pasteMode`          | `"paths"`                     | See **Paste modes** below.                                  |
+| `pasteMode`          | `"paths"`                     | See **Paste modes** above.                                  |
 | `pasteAfterCopy`     | `true`                        | If `true`, send Cmd+V after copying.                        |
 | `pasteDelay`         | `0.15`                        | Seconds between clipboard write and Cmd+V.                  |
+| `burstRelaunchDelay` | `0.15`                        | Seconds between burst shots.                                |
 | `codexCommandPrefix` | `"codex resume --last"`       | Used only by `pasteMode = "codex"`.                         |
-| `hotkeys.*`          | see source                    | Each is `{ {modifiers...}, key }` or `nil`.                 |
-
-## Paste modes
-
-| Mode       | Clipboard payload                                                      | Best for                                                       |
-| ---------- | ---------------------------------------------------------------------- | -------------------------------------------------------------- |
-| `paths`    | Absolute paths, one per line (default).                                | Claude Code, Codex CLI, terminals, anything path-aware.        |
-| `quoted`   | Shell-quoted paths, one line, space-separated.                         | Pasting straight into a shell command.                         |
-| `markdown` | `![](path)` per line.                                                  | Markdown editors, GitHub issues, Notion-ish surfaces.          |
-| `files`    | File references via AppleScript.                                       | Finder. Multi-file paste in non-Finder apps is app-dependent.  |
-| `images`   | Raw image objects on the pasteboard.                                   | Slack, browser chat apps. Most apps only accept the first.     |
-| `codex`    | `codex resume --last --image '/p/one' --image '/p/two'` (configurable) | Codex CLI image input.                                         |
+| `hotkeys.*`          | all `nil`                     | Each is `{ {modifiers...}, key }` or `nil`.                 |
+| `capsBindings.*`     | see source                    | Same shape as `hotkeys`, but fired by the Caps-as-modifier eventtap. |
 
 ## URL events (BetterTouchTool, Raycast, Alfred, shell scripts)
 
-Hammerspoon registers itself as the handler for `hammerspoon://` URLs. Each
-action is reachable that way, so any tool that can `open` a URL can trigger
-QuickShots:
+Hammerspoon registers itself as the handler for `hammerspoon://` URLs.
+Each action is reachable that way:
 
 ```sh
 /usr/bin/open -g 'hammerspoon://quickshot-capture'
 /usr/bin/open -g 'hammerspoon://quickshot-paste-group'
 /usr/bin/open -g 'hammerspoon://quickshot-paste-last?n=5'
+/usr/bin/open -g 'hammerspoon://quickshot-toggle-burst'
 /usr/bin/open -g 'hammerspoon://quickshot-open-folder'
 ```
 
 The `-g` flag matters: it stops macOS from raising Hammerspoon to the
 foreground, so the pending Cmd+V lands in your current app.
 
-In **BetterTouchTool**, set the trigger action to *Open URL / Launch URL* and
-paste one of the URLs above. A common setup is a three-finger force-click or
-tap mapped to `hammerspoon://quickshot-capture`, and a four-finger swipe-up
-mapped to `hammerspoon://quickshot-paste-group`.
+In **BetterTouchTool**, set the trigger action to *Open URL / Launch URL*
+and paste one of the URLs above. A common setup is a three-finger
+force-click mapped to `hammerspoon://quickshot-capture`, and a four-finger
+swipe-up mapped to `hammerspoon://quickshot-paste-group`.
 
-## How a typical session feels
+## A typical session
 
-1. `Caps+A` (or your BTT gesture). Drag the region you want.
-2. Repeat 2–4 times — each shot within 20 s of the previous one extends
-   the same group, no matter how long the burst runs in total.
-3. Switch to Claude Code / Codex / Slack / your browser.
-4. `Caps+V`. The whole group lands in the input — formatted per
-   `pasteMode` — and Cmd+V fires automatically.
+1. `Caps+A`. Drag the region you want.
+2. Repeat 2–4 times within 20 s — each shot extends the same group.
+   (Or `Caps+Z` once to start a burst, then drag as many as you want and
+   `Caps+Z` / `Esc` to stop.)
+3. Switch to Claude Code / Codex / Slack / Messages / your browser.
+4. `Caps+V` (or `Caps+F` for file paste). The whole group lands in the
+   input — formatted per `pasteMode` — and Cmd+V fires automatically.
 
 ## Permissions
 
-macOS will ask for these the first time things run:
+macOS will prompt the first time things run:
 
-- **Accessibility** — Hammerspoon needs this to send Cmd+V and watch hotkeys.
-- **Screen Recording** — `screencapture` itself usually does not need this,
-  but if your captures come back blank, granting it to Hammerspoon is the fix.
+- **Accessibility** — Hammerspoon needs this to send Cmd+V and watch
+  hotkeys. Required.
+- **Screen Recording** — `screencapture` itself usually does not need
+  this, but if your captures come back blank, granting it to Hammerspoon
+  is the fix.
 
-System Settings → Privacy & Security → Accessibility / Screen Recording →
-toggle Hammerspoon on, then reload its config.
+System Settings → Privacy & Security → Accessibility / Screen Recording
+→ toggle Hammerspoon on, then reload its config.
 
 ## Troubleshooting
 
 - **Hotkey does nothing.** Open Hammerspoon's Console (menu-bar icon →
-  Console) and look for errors. Run `hs.reload()` after any config change.
+  Console) and look for errors. Run `hs -c 'hs.reload()'` after any
+  config change.
+- **Hotkey types the letter instead of firing.** The Caps→F18 remap is
+  missing. Run `hidutil property --get UserKeyMapping`; if it's empty,
+  re-run `./caps-setup.sh` and log out / back in.
 - **Screenshot is blank.** Grant Hammerspoon **Screen Recording** in
   System Settings, then reload.
-- **Cmd+V fires in the wrong app.** Increase `pasteDelay` (e.g. `0.25`), or
-  set `pasteAfterCopy = false` and press Cmd+V yourself.
-- **`hammerspoon://` URLs are ignored.** Run Hammerspoon at least once so it
-  registers as the URL handler. macOS may also prompt the first time you
-  open one of these URLs.
-- **Two screenshots within the same millisecond.** Filenames include a
-  millisecond suffix, so genuine collisions essentially never happen, but
-  if one ever does, the second `screencapture` will overwrite the first
-  PNG; the duplicate history entry will resolve to that one file.
+- **Cmd+V fires in the wrong app or before the target focuses.** Bump
+  `pasteDelay` (e.g. `0.25`), or set `pasteAfterCopy = false` and press
+  Cmd+V yourself.
+- **Multi-file paste only delivers one image.** Some apps refuse multi-
+  file paste regardless of clipboard format (chat web-apps especially).
+  Try `pasteMode = "images"` for that workflow, or paste one at a time.
+- **`hammerspoon://` URLs are ignored.** Run Hammerspoon at least once
+  so it registers as the URL handler. macOS may also prompt the first
+  time you open one of these URLs.
 - **Old shots not showing up after editing config.** History lives in
-  Hammerspoon's `hs.settings` store, keyed by `quickshots.history.v1`.
+  Hammerspoon's `hs.settings` store keyed by `quickshots.history.v1`.
   Reloading config does not clear it; only `hs.settings.clear(...)` does.
 
 ## Uninstall
 
-Delete `~/.hammerspoon/quickshots.lua` and remove the
-`-- BEGIN QuickShots loader … -- END QuickShots loader` block from
-`~/.hammerspoon/init.lua`. Backups (timestamped `*.backup-…`) are left
-alone in case you want to roll back. Saved screenshots in
-`~/Pictures/QuickShots` are never touched by the installer or the module.
+```sh
+./caps-uninstall.sh    # if you ran caps-setup.sh
+rm ~/.hammerspoon/quickshots.lua
+# Then remove the -- BEGIN QuickShots loader … -- END block from
+# ~/.hammerspoon/init.lua and reload Hammerspoon.
+```
+
+Backups (timestamped `*.backup-…`) are left alone in case you want to
+roll back. Saved screenshots in `~/Pictures/QuickShots` are never
+touched by the installer or the module.
+
+## Contributing
+
+Issues and PRs are welcome.
+
+- Keep it scrappy. No external dependencies beyond Hammerspoon. No build
+  step. The whole thing should stay readable as a single Lua file.
+- Behaviour changes that affect the default bindings or config keys need
+  a README update in the same PR.
+- Be explicit about what you tested — which apps you pasted into, which
+  macOS version, which Hammerspoon version.
+
+Pushing directly to `main` is owner-only. Fork the repo, push your
+branch, open a PR from there.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
