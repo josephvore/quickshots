@@ -17,6 +17,11 @@ built-in `screencapture` binary, and a few hundred lines of Lua.
   Caps is held.
 - **Burst mode.** Toggle on, drag as many regions as you want with no
   per-shot keypress, toggle off.
+- **Dev capture → Codex.** `Caps+D` captures shots into a per-session dir,
+  then opens a new iTerm window running the Codex CLI with the images
+  attached and an auto-generated capture-context prompt pre-pasted.
+- **Retention sweep.** PNGs older than `retentionDays` (default 30) are
+  pruned from the screenshot dirs on start and once a day.
 - **Auto-grouping.** Screenshots taken within a configurable time window
   (default 20 s) — or all shots from the same burst — become one paste
   group automatically.
@@ -74,6 +79,7 @@ below.
 | -------------- | ---------------------------------------------- |
 | `Caps+A`       | Drag-area screenshot                           |
 | `Caps+Z`       | Toggle burst mode                              |
+| `Caps+D`       | Dev capture session → Codex (see below)        |
 | `Caps+V`       | Paste latest auto-group (current `pasteMode`)  |
 | `Caps+F`       | Paste latest auto-group as files (Finder-style)|
 | `Caps+N`       | Paste last `defaultLastN` (4)                  |
@@ -94,6 +100,30 @@ produces `hello`. The host app never sees a `Caps` keypress on its own.
 
 `Caps+V` (or `Caps+F`) after a burst pastes the *entire burst*, no matter
 how long the burst ran — the time-window grouping doesn't apply to bursts.
+
+### Dev capture → Codex
+
+`Caps+D` runs a self-contained capture-and-hand-off session aimed at the
+[Codex CLI](https://github.com/openai/codex):
+
+1. First `Caps+D` starts a session. Shots are saved into a fresh
+   per-session dir under `~/Screenshots/dev/<timestamp>/`, and the
+   drag-area picker re-launches after every shot (like burst).
+2. `Caps+D` again — or `Esc` on an empty picker — finishes the session.
+3. If at least one shot was taken, QuickShots:
+   - resolves the target repo from the frontmost iTerm session's working
+     directory (`git rev-parse --show-toplevel`), falling back to
+     `devCapture.defaultRepo`;
+   - builds an auto-generated **capture context** block (screenshot count
+     + names + time, repo/branch/worktree, and a detected `node`/`next`
+     dev-server port — lines are omitted when their data is unavailable);
+   - opens a **new iTerm window**, `cd`s into the repo, and runs
+     `codex -i <shot1> -i <shot2> …` so the images attach to the TUI;
+   - after `devCapture.codexBootDelay` seconds, pastes a staging prompt
+     into the TUI input and leaves the cursor on the `Task:` line.
+
+It does **not** press Enter — dictate (or type) your task after the
+`Task:` line and submit it yourself.
 
 ### Standard Hammerspoon hotkeys (off by default)
 
@@ -143,8 +173,14 @@ qs.start({
 | `pasteMode`          | `"paths"`                     | See **Paste modes** above.                                  |
 | `pasteAfterCopy`     | `true`                        | If `true`, send Cmd+V after copying.                        |
 | `pasteDelay`         | `0.15`                        | Seconds between clipboard write and Cmd+V.                  |
-| `burstRelaunchDelay` | `0.15`                        | Seconds between burst shots.                                |
+| `burstRelaunchDelay` | `0.15`                        | Seconds between burst shots (also reused by dev capture).   |
 | `codexCommandPrefix` | `"codex resume --last"`       | Used only by `pasteMode = "codex"`.                         |
+| `retentionDays`      | `30`                          | Delete `*.png` older than this from `saveDir` + `devCapture.saveDir` on start and daily. `0`/`nil` disables. |
+| `devCapture.saveDir` | `$HOME/Screenshots/dev`       | Per-session subdirs (`<timestamp>/`) are created here.      |
+| `devCapture.defaultRepo` | `/Volumes/Code/EquipFlow/equipflow` | Fallback repo when the iTerm cwd isn't a git repo.   |
+| `devCapture.codexCmd`    | `"codex"`                 | Codex CLI binary; must support `-i/--image`.                |
+| `devCapture.codexBootDelay` | `2.5`                  | Seconds to wait for the TUI to boot before pasting the staging prompt. |
+| `devCapture.pasteStaging`   | `true`                 | If `true`, paste the staging prompt after boot (cursor on `Task:`). |
 | `hotkeys.*`          | all `nil`                     | Each is `{ {modifiers...}, key }` or `nil`.                 |
 | `capsBindings.*`     | see source                    | Same shape as `hotkeys`, but fired by the Caps-as-modifier eventtap. |
 
@@ -158,6 +194,7 @@ Each action is reachable that way:
 /usr/bin/open -g 'hammerspoon://quickshot-paste-group'
 /usr/bin/open -g 'hammerspoon://quickshot-paste-last?n=5'
 /usr/bin/open -g 'hammerspoon://quickshot-toggle-burst'
+/usr/bin/open -g 'hammerspoon://quickshot-dev-capture'
 /usr/bin/open -g 'hammerspoon://quickshot-open-folder'
 ```
 

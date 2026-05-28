@@ -6,9 +6,11 @@ local M = {}
 ----------------------------------------------------------------
 -- USER CONFIGURATION (edit values to taste)
 ----------------------------------------------------------------
+local HOME = os.getenv("HOME") or ""
+
 local config = {
   -- Where screenshots are stored.
-  saveDir = (os.getenv("HOME") or "") .. "/Pictures/QuickShots",
+  saveDir = HOME .. "/Pictures/QuickShots",
 
   -- Two screenshots whose timestamps differ by <= this many seconds
   -- belong to the same auto-group.
@@ -64,10 +66,26 @@ local config = {
     openFolder  = { {},          "o" }, -- Caps+O           open saveDir in Finder
     toggleBurst = { {},          "z" }, -- Caps+Z           toggle burst mode
     pasteFiles  = { {},          "f" }, -- Caps+F           paste latest group as files
+    devCapture  = { {},          "d" }, -- Caps+D           dev capture session → Codex
   },
 
   -- Delay (seconds) between one burst capture finishing and the next launching.
   burstRelaunchDelay = 0.15,
+
+  -- "Dev Capture → Codex" session (Caps+D). Captures one or more drag-area
+  -- shots into a fresh per-session dir, then opens a new iTerm window running
+  -- the Codex CLI with the shots attached and a staging prompt pre-pasted.
+  devCapture = {
+    saveDir       = HOME .. "/Screenshots/dev",          -- per-session subdirs created here
+    defaultRepo   = "/Volumes/Code/EquipFlow/equipflow", -- fallback repo if iTerm cwd unresolvable
+    codexCmd      = "codex",                             -- Codex CLI binary (must support -i/--image)
+    codexBootDelay = 2.5,                                -- seconds to wait for the TUI before pasting
+    pasteStaging  = true,                                -- if true, paste the staging prompt after boot
+  },
+
+  -- Delete *.png older than this many days from saveDir and devCapture.saveDir
+  -- on start() and once per day. Set to 0 or nil to disable the sweep.
+  retentionDays = 30,
 }
 
 local SETTINGS_KEY = "quickshots.history.v1"
@@ -80,6 +98,13 @@ local activeTask = nil        -- holds the running screencapture task
 local burstMode = false       -- true while a burst session is active
 local burstId = nil           -- stable id stamped onto every shot in the burst
 
+-- "Dev Capture → Codex" session state.
+local devMode = false         -- true while a dev-capture session is active
+local devDir = nil            -- absolute per-session dir for this dev capture
+local devShots = nil          -- ordered list of absolute shot paths in this session
+
+local retentionTimer = nil    -- holds the daily retention-sweep timer
+
 ----------------------------------------------------------------
 -- HELPERS
 ----------------------------------------------------------------
@@ -91,8 +116,27 @@ local function osaQuote(s)
   return '"' .. tostring(s):gsub("\\", "\\\\"):gsub('"', '\\"') .. '"'
 end
 
+local function ensureDirAt(dir)
+  if not dir or dir == "" then return end
+  hs.execute("/bin/mkdir -p " .. shellQuote(dir))
+end
+
 local function ensureDir()
-  hs.execute("/bin/mkdir -p " .. shellQuote(config.saveDir))
+  ensureDirAt(config.saveDir)
+end
+
+local function basename(path)
+  return tostring(path or ""):match("[^/]+$") or tostring(path or "")
+end
+
+-- Run a command and return trimmed stdout, or nil on failure / empty output.
+-- Each arg is shell-quoted; pass a single pre-built string for pipelines.
+local function trimmedOutput(cmd)
+  local out, ok = hs.execute(cmd)
+  if not ok or not out then return nil end
+  out = out:gsub("%s+$", "")
+  if out == "" then return nil end
+  return out
 end
 
 local function fileOk(path)
@@ -107,6 +151,15 @@ local function newPath()
   local ms = math.floor((now - secs) * 1000)
   return string.format("%s/quickshot-%s-%03d.png",
     config.saveDir, os.date("%Y%m%d-%H%M%S", secs), ms)
+end
+
+-- Path for a shot inside an active dev-capture session dir.
+local function newDevPath(dir)
+  local now = hs.timer.secondsSinceEpoch()
+  local secs = math.floor(now)
+  local ms = math.floor((now - secs) * 1000)
+  return string.format("%s/shot-%s-%03d.png",
+    dir, os.date("%Y%m%d-%H%M%S", secs), ms)
 end
 
 ----------------------------------------------------------------
@@ -129,6 +182,43 @@ local function appendHistory(path, burst)
     table.remove(h, 1)
   end
   saveHistory(h)
+end
+
+----------------------------------------------------------------
+-- RETENTION SWEEP
+----------------------------------------------------------------
+-- Delete *.png files older than config.retentionDays from saveDir and
+-- devCapture.saveDir (recursively), then drop history entries whose files no
+-- longer exist. SAFETY: only ever deletes ".png" files located inside those
+-- two configured dirs — nothing else is ever touched.
+local function sweepRetention()
+  local days = tonumber(config.retentionDays)
+  if not days or days <= 0 then return end
+
+  local dirs = { config.saveDir }
+  if config.devCapture and config.devCapture.saveDir then
+    dirs[#dirs + 1] = config.devCapture.saveDir
+  end
+
+  for _, dir in ipairs(dirs) do
+    if dir and dir ~= "" and hs.fs.attributes(dir, "mode") == "directory" then
+      -- -name '*.png' constrains deletion to PNGs; -mtime +<days> picks files
+      -- older than the cutoff; the path is shell-quoted so it never expands.
+      hs.execute(string.format(
+        "/usr/bin/find %s -type f -name '*.png' -mtime +%d -delete 2>/dev/null",
+        shellQuote(dir), math.floor(days)))
+    end
+  end
+
+  -- Prune history entries whose files are gone (deleted above or by the user).
+  local h = loadHistory()
+  local kept = {}
+  for _, it in ipairs(h) do
+    if it and it.path and hs.fs.attributes(it.path) then
+      kept[#kept + 1] = it
+    end
+  end
+  if #kept ~= #h then saveHistory(kept) end
 end
 
 ----------------------------------------------------------------
@@ -371,6 +461,244 @@ function M.toggleBurst()
 end
 
 ----------------------------------------------------------------
+-- DEV CAPTURE → CODEX (Caps+D)
+----------------------------------------------------------------
+
+-- Resolve the working directory of the frontmost iTerm session, or nil.
+local function itermSessionPath()
+  local ok, result = hs.osascript.applescript([[
+    tell application "iTerm"
+      if (count of windows) is 0 then return ""
+      tell current session of current window
+        return (variable named "session.path")
+      end tell
+    end tell
+  ]])
+  if ok and type(result) == "string" and result ~= "" then
+    return result
+  end
+  return nil
+end
+
+-- git toplevel for a directory, or nil if not inside a repo.
+local function gitToplevel(dir)
+  if not dir or dir == "" then return nil end
+  return trimmedOutput(
+    "cd " .. shellQuote(dir) .. " && /usr/bin/git rev-parse --show-toplevel 2>/dev/null")
+end
+
+-- Current branch name for a repo dir, or nil (e.g. detached HEAD).
+local function gitBranch(dir)
+  if not dir or dir == "" then return nil end
+  return trimmedOutput(
+    "cd " .. shellQuote(dir) .. " && /usr/bin/git branch --show-current 2>/dev/null")
+end
+
+-- If HEAD lives in a linked worktree, return that worktree's path; else nil.
+-- A normal checkout has absolute-git-dir == absolute git-common-dir; a linked
+-- worktree's git-dir is <common>/worktrees/<name>, so the two differ.
+local function gitLinkedWorktree(dir)
+  if not dir or dir == "" then return nil end
+  local gitDir = trimmedOutput(
+    "cd " .. shellQuote(dir) .. " && /usr/bin/git rev-parse --absolute-git-dir 2>/dev/null")
+  local commonDir = trimmedOutput(
+    "cd " .. shellQuote(dir) ..
+    " && cd \"$(/usr/bin/git rev-parse --git-common-dir 2>/dev/null)\" && pwd 2>/dev/null")
+  if gitDir and commonDir and gitDir ~= commonDir then
+    return gitToplevel(dir)
+  end
+  return nil
+end
+
+-- Detect a local node/next dev server. Returns the lowest listening port as a
+-- string, or nil if none. Filters `lsof` LISTEN rows to node-family commands.
+local function detectDevServerPort()
+  local out = trimmedOutput(
+    "/usr/sbin/lsof -iTCP -sTCP:LISTEN -P -n 2>/dev/null" ..
+    " | /usr/bin/grep -iE 'node|next' || true")
+  if not out then return nil end
+  local best = nil
+  for line in out:gmatch("[^\n]+") do
+    local port = line:match(":(%d+)%s+%(LISTEN%)")
+    if port then
+      port = tonumber(port)
+      if port and (not best or port < best) then best = port end
+    end
+  end
+  return best and tostring(best) or nil
+end
+
+-- Build the auto-generated capture-context META block. `info` is a table with
+-- optional keys: shots (list of basenames), repo, branch, worktree, port,
+-- timestamp. Lines whose data is unavailable are omitted. Pure logic — no I/O.
+local function buildMeta(info)
+  local lines = { "## Capture context (auto-generated)" }
+
+  local shots = info.shots or {}
+  if #shots > 0 then
+    lines[#lines + 1] = string.format(
+      "- Screenshots: %d — %s (attached) — %s",
+      #shots, table.concat(shots, ", "), info.timestamp or "")
+  end
+
+  if info.repo and info.repo ~= "" then
+    local extra = {}
+    if info.branch and info.branch ~= "" then
+      extra[#extra + 1] = "branch: " .. info.branch
+    end
+    if info.worktree and info.worktree ~= "" then
+      extra[#extra + 1] = "worktree: " .. info.worktree
+    end
+    local suffix = ""
+    if #extra > 0 then suffix = " (" .. table.concat(extra, "; ") .. ")" end
+    lines[#lines + 1] = "- Repo: " .. info.repo .. suffix
+  end
+
+  if info.port and info.port ~= "" then
+    lines[#lines + 1] = "- Dev server: http://localhost:" .. info.port
+  end
+
+  return table.concat(lines, "\n")
+end
+
+-- Build the staging text pasted into the Codex TUI. Pure logic.
+local function buildStaging(meta)
+  return "Refer to the attached screenshots as the primary source of truth for what I'm pointing at.\n"
+    .. "Read the capture context below for environment details, then do the task at the end.\n\n"
+    .. meta .. "\n\nTask:\n"
+end
+
+-- Launch a fresh iTerm window, cd into the repo, and run the Codex CLI with all
+-- shots attached via -i. Returns true if the AppleScript dispatch succeeded.
+local function launchCodexWindow(repo, shots)
+  local cmdParts = { "cd " .. shellQuote(repo), "&&", config.devCapture.codexCmd }
+  for _, p in ipairs(shots) do
+    cmdParts[#cmdParts + 1] = "-i " .. shellQuote(p)
+  end
+  local cmd = table.concat(cmdParts, " ")
+
+  local script = table.concat({
+    'tell application "iTerm"',
+    '  activate',
+    '  set newWindow to (create window with default profile)',
+    '  tell current session of newWindow',
+    '    write text ' .. osaQuote(cmd),
+    '  end tell',
+    'end tell',
+  }, "\n")
+
+  local ok, _, err = hs.osascript.applescript(script)
+  if not ok then
+    hs.printf("QuickShots devCapture: iTerm launch failed: %s", hs.inspect and hs.inspect(err) or tostring(err))
+  end
+  return ok
+end
+
+-- After the TUI boots, drop the staging text on the clipboard and paste it,
+-- leaving the cursor at the end (after "Task:\n"). Never presses Enter.
+local function pasteStagingIntoCodex(staging)
+  hs.pasteboard.setContents(staging)
+  hs.eventtap.keyStroke({ "cmd" }, "v", 0)
+end
+
+-- Gather context + orchestrate the Codex hand-off for a finished session.
+local function finishDevToCodex(shots)
+  -- Resolve target repo from the frontmost iTerm session, else fall back.
+  local cwd = itermSessionPath()
+  local repo = gitToplevel(cwd) or config.devCapture.defaultRepo
+
+  local basenames = {}
+  for _, p in ipairs(shots) do basenames[#basenames + 1] = basename(p) end
+
+  local info = {
+    shots     = basenames,
+    timestamp = os.date("%Y-%m-%d %H:%M"),
+    repo      = repo,
+    branch    = gitBranch(repo),
+    worktree  = gitLinkedWorktree(repo),
+    port      = detectDevServerPort(),
+  }
+  local meta = buildMeta(info)
+  local staging = buildStaging(meta)
+
+  if not launchCodexWindow(repo, shots) then
+    hs.alert.show("QuickShots: failed to open Codex window", config.alertDurationErr)
+    return
+  end
+
+  hs.alert.show(
+    string.format("🧑‍💻 Codex: %d shot%s → %s", #shots, #shots == 1 and "" or "s", basename(repo)),
+    config.alertDurationOk)
+
+  if config.devCapture.pasteStaging then
+    hs.timer.doAfter(config.devCapture.codexBootDelay or 2.5, function()
+      pasteStagingIntoCodex(staging)
+    end)
+  end
+end
+
+-- One interactive drag-area capture into the active dev-session dir. Mirrors
+-- M.capture()'s relaunch chain, but routes shots to devShots / devDir and, on
+-- an empty (Esc) capture, finishes the session.
+local function devCaptureOnce()
+  if not devMode or not devDir then return end
+  if capturing then
+    hs.alert.show("QuickShots: capture already in progress", config.alertDurationErr)
+    return
+  end
+  ensureDirAt(devDir)
+  local path = newDevPath(devDir)
+  capturing = true
+  activeTask = hs.task.new("/usr/sbin/screencapture", function(_, _, _)
+    capturing = false
+    activeTask = nil
+    if fileOk(path) then
+      if devShots then devShots[#devShots + 1] = path end
+      hs.alert.show("📸 Dev shot saved", config.alertDurationOk)
+      -- Chain the next capture so the user can drag again immediately.
+      if devMode then
+        hs.timer.doAfter(config.burstRelaunchDelay or 0.15, function()
+          if devMode then devCaptureOnce() end
+        end)
+      end
+    else
+      -- Empty/cancelled (Escape) finishes the dev session.
+      if devMode then M.toggleDevCapture() end
+    end
+  end, { "-i", path })
+  if not activeTask or not activeTask:start() then
+    capturing = false
+    activeTask = nil
+    hs.alert.show("QuickShots: failed to launch screencapture", config.alertDurationErr)
+  end
+end
+
+-- Toggle a "dev capture session". First press starts it (fresh per-session
+-- dir + interactive captures that auto-relaunch). Second press (or Esc on an
+-- empty capture) finishes it and, if ≥1 shot was taken, hands off to Codex.
+function M.toggleDevCapture()
+  if not devMode then
+    devMode = true
+    devShots = {}
+    devDir = string.format("%s/%s",
+      config.devCapture.saveDir, os.date("%Y%m%d-%H%M%S"))
+    ensureDirAt(devDir)
+    hs.alert.show("🧑‍💻 Dev capture ON — drag shots; Caps+D (or Esc) to finish", 1.5)
+    if not capturing then devCaptureOnce() end
+  else
+    devMode = false
+    local shots = devShots or {}
+    devShots = nil
+    devDir = nil
+    if #shots == 0 then
+      hs.alert.show("🧑‍💻 Dev capture cancelled (no shots)", config.alertDurationOk)
+      return
+    end
+    finishDevToCodex(shots)
+  end
+end
+
+----------------------------------------------------------------
 -- "Caps as held modifier" eventtap (Caps Lock remapped to F18 by hidutil)
 ----------------------------------------------------------------
 local capsTap = nil
@@ -414,6 +742,7 @@ local function setupCapsBindings()
   add("promptLastN", function() M.promptLastN() end)
   add("openFolder",  function() M.openFolder() end)
   add("toggleBurst", function() M.toggleBurst() end)
+  add("devCapture",  function() M.toggleDevCapture() end)
   add("pasteFiles",  function()
     local saved = config.pasteMode
     config.pasteMode = "files"
@@ -503,6 +832,12 @@ function M.start(userConfig)
   end)
   hs.urlevent.bind("quickshot-open-folder", function() M.openFolder() end)
   hs.urlevent.bind("quickshot-toggle-burst", function() M.toggleBurst() end)
+  hs.urlevent.bind("quickshot-dev-capture", function() M.toggleDevCapture() end)
+
+  -- Retention sweep: prune old PNGs now and once a day thereafter.
+  sweepRetention()
+  if retentionTimer then retentionTimer:stop() end
+  retentionTimer = hs.timer.doEvery(24 * 60 * 60, sweepRetention)
 
   -- Visible confirmation that the config loaded and bindings are live.
   hs.alert.show("QuickShots ready", config.alertDurationOk)
