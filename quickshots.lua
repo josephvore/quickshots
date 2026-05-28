@@ -529,7 +529,7 @@ local function detectDevServerPort()
 end
 
 -- Build the auto-generated capture-context META block. `info` is a table with
--- optional keys: shots (list of basenames), repo, branch, worktree, port,
+-- optional keys: shots (list of absolute paths), repo, branch, worktree, port,
 -- timestamp. Lines whose data is unavailable are omitted. Pure logic — no I/O.
 local function buildMeta(info)
   local lines = { "## Capture context (auto-generated)" }
@@ -537,8 +537,11 @@ local function buildMeta(info)
   local shots = info.shots or {}
   if #shots > 0 then
     lines[#lines + 1] = string.format(
-      "- Screenshots: %d — %s (attached) — %s",
-      #shots, table.concat(shots, ", "), info.timestamp or "")
+      "- Screenshots (%d, captured %s) — open and VIEW each of these image files:",
+      #shots, info.timestamp or "")
+    for _, p in ipairs(shots) do
+      lines[#lines + 1] = "    - " .. p
+    end
   end
 
   if info.repo and info.repo ~= "" then
@@ -563,19 +566,20 @@ end
 
 -- Build the staging text pasted into the Codex TUI. Pure logic.
 local function buildStaging(meta)
-  return "Refer to the attached screenshots as the primary source of truth for what I'm pointing at.\n"
-    .. "Read the capture context below for environment details, then do the task at the end.\n\n"
+  return "First open and VIEW the screenshot image files listed below — they are the source of truth for what I'm pointing at.\n"
+    .. "Then read the capture context for environment details. Do NOT take any action until you have read the Task at the end.\n\n"
     .. meta .. "\n\nTask:\n"
 end
 
--- Launch a fresh iTerm window, cd into the repo, and run the Codex CLI with all
--- shots attached via -i. Returns true if the AppleScript dispatch succeeded.
-local function launchCodexWindow(repo, shots)
-  local cmdParts = { "cd " .. shellQuote(repo), "&&", config.devCapture.codexCmd }
-  for _, p in ipairs(shots) do
-    cmdParts[#cmdParts + 1] = "-i " .. shellQuote(p)
-  end
-  local cmd = table.concat(cmdParts, " ")
+-- Launch a fresh iTerm window, cd into the repo, and open Codex IDLE.
+-- IMPORTANT: we deliberately do NOT pass `-i <imgs>`. `codex -i <imgs>` with no
+-- prompt text auto-submits an initial turn containing just the images, which —
+-- under a repo's "Recovery First" AGENTS.md plus approval_policy="never" —
+-- makes Codex start executing before the user has dictated anything. Bare
+-- `codex` opens an idle composer that runs nothing until the user submits; the
+-- shots are referenced by absolute path in the staging text for the model to open.
+local function launchCodexWindow(repo)
+  local cmd = "cd " .. shellQuote(repo) .. " && " .. config.devCapture.codexCmd
 
   local script = table.concat({
     'tell application "iTerm"',
@@ -607,11 +611,8 @@ local function finishDevToCodex(shots)
   local cwd = itermSessionPath()
   local repo = gitToplevel(cwd) or config.devCapture.defaultRepo
 
-  local basenames = {}
-  for _, p in ipairs(shots) do basenames[#basenames + 1] = basename(p) end
-
   local info = {
-    shots     = basenames,
+    shots     = shots,   -- absolute paths; referenced in the staging text (not -i attached)
     timestamp = os.date("%Y-%m-%d %H:%M"),
     repo      = repo,
     branch    = gitBranch(repo),
@@ -621,7 +622,7 @@ local function finishDevToCodex(shots)
   local meta = buildMeta(info)
   local staging = buildStaging(meta)
 
-  if not launchCodexWindow(repo, shots) then
+  if not launchCodexWindow(repo) then
     hs.alert.show("QuickShots: failed to open Codex window", config.alertDurationErr)
     return
   end
